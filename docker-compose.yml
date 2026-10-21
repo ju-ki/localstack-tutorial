@@ -1,16 +1,12 @@
-version: '3.8'
 
 services:
   localstack:
-    image: localstack/localstack:latest
+    image: localstack/localstack:3
     container_name: localstack_demo
     ports:
       - "127.0.0.1:4566:4566"
     environment:
       - DOCKER_HOST=unix:///var/run/docker.sock
-      - LOCALSTACK_AUTH_TOKEN=${LOCALSTACK_AUTH_TOKEN}
-    build:
-      dockerfile: Dockerfile
     volumes:
-      - "/var/run/docker.sock:/var/run/docker.sock"
+      - "${HOME}/.docker/run/docker.sock:/var/run/docker.sock"
 
