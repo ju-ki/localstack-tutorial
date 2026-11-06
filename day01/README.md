@@ -80,3 +80,88 @@ arn:aws:iam::000000000000:root
 - [STS: GetCallerIdentity](https://docs.aws.amazon.com/STS/latest/APIReference/API_GetCallerIdentity.html)
 - [S3: CreateBucket](https://docs.aws.amazon.com/AmazonS3/latest/API/API_CreateBucket.html)
 - [S3: バケットの命名規則](https://docs.aws.amazon.com/AmazonS3/latest/userguide/bucketnamingrules.html)
+
+---
+
+# 演習2: IAM — Lambda 用のロールを作る
+
+## 自分のまとめ
+
+- **信頼ポリシー**は「誰がこのロールを借りることができるか」、**権限ポリシー**は「このロールで、どのリソースに対して、どのアクションが許可されているか」を示す
+- IAM ユーザーはパスワードやアクセスキーといった**長期の認証情報**を持つ。ロールは長期の認証情報を持たず、引き受けた（AssumeRole）ときに STS から**期限付きの認証情報**が発行される。一時的なのは「権限」ではなく「認証情報」
+- ロールは「入館証」のようなもの。信頼ポリシー＝誰が入館証を借りられるか、権限ポリシー＝その入館証でどの部屋に入れるか
+
+## 実行したコマンド
+
+### 1. ロールを作り、信頼ポリシーを直す
+
+```bash
+# 作成（最初は信頼ポリシーが誤っていた）
+aws iam create-role --role-name sample-role --assume-role-policy-document '{...}'
+
+# 信頼ポリシーだけを差し替える
+aws iam update-assume-role-policy --role-name sample-role --policy-document '{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"Service":"lambda.amazonaws.com"},"Action":"sts:AssumeRole"}]}'
+```
+
+完成した信頼ポリシーは「**Lambda サービスが、このロールを引き受ける（sts:AssumeRole）ことを許可する**」という意味。
+
+- Lambda 関数が動くとき、そこに人はいない。**Lambda サービス自身**がロールを引き受け、一時キーを関数の実行環境に渡す。だから関数のコードにアクセスキーを書かなくてよい
+- Lambda はどのロールでも引き受けられるわけではない。信頼ポリシーに `lambda.amazonaws.com` があり、かつ関数作成時に `--role` で指定したロールだけ
+- 引き受けてよいかを判断するのは Lambda ではなく、AWS（IAM / STS）側
+- 信頼ポリシーに書けるのは「誰がロールになれるか」だけ。ロールになった後に何ができるかは、権限ポリシーで決まる
+
+### 2. 権限ポリシー（インライン）を付ける
+
+`policy/s3-sample-policy.json`:
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "SampleS3ListRole",
+      "Effect": "Allow",
+      "Action": ["s3:ListBucket"],
+      "Resource": "arn:aws:s3:::s3-demo-bucket"
+    },
+    {
+      "Sid": "SampleS3DetailRole",
+      "Effect": "Allow",
+      "Action": ["s3:GetObject"],
+      "Resource": "arn:aws:s3:::s3-demo-bucket/*"
+    }
+  ]
+}
+```
+
+```bash
+aws iam put-role-policy --role-name sample-role --policy-name s3-sample-policy-name --policy-document file://policy/s3-sample-policy.json
+aws iam get-role-policy --role-name sample-role --policy-name s3-sample-policy-name
+```
+
+- 一覧（`s3:ListBucket`）は**バケットそのもの**の ARN、中身の取得（`s3:GetObject`）は**オブジェクト**の ARN（`バケット/*`）に対して許可する。だから Resource を分ける
+- API 名と IAM のアクション名は一致しないことがある。一覧の API は `ListObjectsV2` だが、IAM のアクションは `s3:ListBucket`
+- ファイルから渡すときは `file://` が必要。付けないと、ファイル名の文字列そのものが JSON として送られる
+
+## つまずいたところ
+
+1. **信頼ポリシーに権限ポリシーの中身を書いていた**
+   `"Action": "lambda:*"` は「Lambda の操作を何でもしてよい」という権限の書き方。信頼ポリシーの Action は「ロールを引き受ける」= `sts:AssumeRole`
+2. **Principal にアカウントの ARN を書いていた**
+   `"AWS": "arn:aws:iam::000000000000:root"` は「そのアカウントの中の人が引き受けてよい」という意味で、人がロールを切り替えるときの形。サービスを指すときはキーが `"Service"` で、値は ARN ではなく `lambda.amazonaws.com` のような名前
+3. **間違ったポリシーでもロールが作れてしまった**
+   作成に成功しても、ポリシーが正しいとは限らない
+
+## LocalStack と本番 AWS の違いメモ
+
+- LocalStack は初期設定では、ポリシーの中身を**検証も強制もしない**。API の形が合っていれば受け付ける
+- 本番では、たとえば `"Service"` にアカウントの ARN を書くと、作成時に `MalformedPolicyDocument`（Invalid principal）で弾かれる
+- LocalStack でも `ENFORCE_IAM=1` を設定すると、権限チェックを有効にできる
+
+## 参考ドキュメント
+
+- [IAM ロール](https://docs.aws.amazon.com/ja_jp/IAM/latest/UserGuide/id_roles.html)
+- [Lambda 実行ロール](https://docs.aws.amazon.com/ja_jp/lambda/latest/dg/lambda-intro-execution-role.html)
+- [STS API リファレンス](https://docs.aws.amazon.com/STS/latest/APIReference/API_Operations.html)
+- [Amazon S3 のアクション一覧](https://docs.aws.amazon.com/ja_jp/service-authorization/latest/reference/list_amazons3.html)
+- [LocalStack: IAM Policy Enforcement](https://docs.localstack.cloud/user-guide/security-testing/iam-enforcement/)
