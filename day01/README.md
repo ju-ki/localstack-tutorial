@@ -165,3 +165,111 @@ aws iam get-role-policy --role-name sample-role --policy-name s3-sample-policy-n
 - [STS API リファレンス](https://docs.aws.amazon.com/STS/latest/APIReference/API_Operations.html)
 - [Amazon S3 のアクション一覧](https://docs.aws.amazon.com/ja_jp/service-authorization/latest/reference/list_amazons3.html)
 - [LocalStack: IAM Policy Enforcement](https://docs.localstack.cloud/user-guide/security-testing/iam-enforcement/)
+
+---
+
+# 演習3: S3 — バケット・オブジェクト・バージョニング
+
+## 自分のまとめ
+
+- S3 はクラウド上のオブジェクトストレージ。CLI には `aws s3`（高レベル）と `aws s3api`（API レベル）の2系統があり、より細かい操作ができるのが `s3api`。どちらも同じ S3 API を呼んでいる
+- キーに `/` を含めるとフォルダのように見えるが、フォルダは実際には存在しない。一覧を取るときに S3 が `/` を区切り文字としてキーをまとめ、`CommonPrefixes` として返しているだけ
+- バージョニングを有効にすると、一つのキー（オブジェクト）に対して複数の履歴（バージョン）を持てる
+
+## aws s3 と aws s3api
+
+| | `aws s3` | `aws s3api` |
+| --- | --- | --- |
+| 作り | 複数の API 呼び出しをまとめた便利コマンド | S3 の API 1つにコマンドが1つずつ対応 |
+| 例 | `mb` / `cp` / `ls` / `rb` / `sync` | `create-bucket` / `put-object` / `list-objects-v2` / `put-bucket-versioning` |
+| 得意なこと | 大きいファイルの自動マルチパート、`--recursive` でまとめて操作 | バケット設定の変更など、API の細かいパラメータを使う操作 |
+
+- バケットの作成・削除はどちらでもできる。違いは「何ができるか」より「どういう単位で作られているか」
+- バージョニングの設定はバケットの設定を変える API（`PutBucketVersioning`）なので、`aws s3` にはなく `s3api` を使う
+
+## 実行したコマンド
+
+### 1. バケットを作る
+
+```bash
+aws s3api create-bucket --bucket s3-demo-bucket --region ap-northeast-1 --create-bucket-configuration LocationConstraint=ap-northeast-1
+aws s3 ls
+```
+
+- `--profile` を付けていないのは、`export AWS_PROFILE=localstack` を設定済みで、そのプロファイルに `endpoint_url = http://localhost:4566` があるから
+- `AWS_PROFILE` が効くのはそのシェルの中だけ。新しいタブでは元に戻るので `echo $AWS_PROFILE` で確認する
+
+### 2. notes/ 配下にアップロードして確認する
+
+```bash
+aws s3 cp notes/ s3://s3-demo-bucket/notes --recursive
+aws s3 ls s3://s3-demo-bucket/notes --recursive
+aws s3 cp s3://s3-demo-bucket/notes/test.json ./notes/test_copy.json
+diff notes/test.json notes/test_copy.json   # 何も出なければ同じ
+```
+
+フォルダの正体を確かめる:
+
+```bash
+aws s3api list-objects-v2 --bucket s3-demo-bucket
+aws s3api list-objects-v2 --bucket s3-demo-bucket --delimiter /
+```
+
+| | 区切り文字なし | `--delimiter /` |
+| --- | --- | --- |
+| `Contents` | `notes/test.json` と `test.json` の両方 | `test.json` だけ |
+| `CommonPrefixes` | なし | `notes/` |
+
+- オブジェクトのキー（名前）は `notes/test.json` という1本の文字列。`notes/` はその先頭部分（プレフィックス）で、オブジェクトではない
+- `aws s3 ls` の `PRE notes/` という表示は、この `CommonPrefixes`
+- 中身が同じ `notes/test.json` と `test.json` は ETag も同じだった。ETag はキーではなく中身から計算される（1回で送ったアップロードなら中身の MD5）ので、キーが違っても中身が同じなら同じ値になる
+
+### 3. バージョニングを有効にして上書きする
+
+```bash
+aws s3api put-bucket-versioning --bucket s3-demo-bucket --versioning-configuration Status=Enabled
+aws s3api get-bucket-versioning --bucket s3-demo-bucket   # "Status": "Enabled"
+
+# 中身を変えて2回上書き
+aws s3 cp ./notes/test.json s3://s3-demo-bucket/notes/test.json
+aws s3 cp ./notes/test.json s3://s3-demo-bucket/notes/test.json
+
+aws s3api list-object-versions --bucket s3-demo-bucket --prefix notes/
+```
+
+`notes/test.json` のバージョンが3つ:
+
+| VersionId | IsLatest | 何か |
+| --- | --- | --- |
+| `U7_U45p...` | true | 2回目の上書き（最新） |
+| `IGVzA5K...` | false | 1回目の上書き |
+| `null` | false | バージョニングを有効にする前からあったもの |
+
+- バージョニングを有効にする前から保存されていたオブジェクトは、`VersionId` が `null` になる
+- `--prefix` を付けないと、ほかのキー（`test.json`）のバージョンも一覧に混ざる
+
+## つまずいたところ
+
+1. **バケット名のタイポ**
+   `s3-demo--bucket`（ハイフン2つ）で作ってしまった。演習2の権限ポリシーは `s3-demo-bucket` を対象にしているので、名前が違うと権限が効かない。削除して作り直した
+2. **`notes/` 配下ではなく直下にアップロードしていた**
+   コピー先を `s3://s3-demo-bucket` にしていたため。`ls` の結果でキーを確認すれば気づける
+3. **ダウンロード確認で直下の古いファイルを取っていた**
+   `s3://s3-demo-bucket/test.json` を取っていた。不要なオブジェクトを先に消しておけば、エラーで気づける
+4. **「プレフィックスを一つのオブジェクトとして扱っている」と考えていた**
+   プレフィックスはオブジェクトではなく、キーの先頭部分。一覧のときにまとめて表示されるだけ
+
+## LocalStack と本番 AWS の違いメモ
+
+- LocalStack の `Location` は `http://<バケット名>.s3.localhost.localstack.cloud:4566/` になる。本番は `https://<バケット名>.s3.amazonaws.com/` などの形
+- 本番のマネジメントコンソールで「フォルダを作成」すると、`notes/` という 0 バイトのオブジェクトが実際に作られる。フォルダに見えるものの正体は、これかプレフィックスのどちらか
+- 本番では、us-east-1 以外のリージョンにバケットを作るとき `LocationConstraint` が必須
+
+## 参考ドキュメント
+
+- [AWS CLI: 高レベル (s3) コマンド](https://docs.aws.amazon.com/ja_jp/cli/latest/userguide/cli-services-s3-commands.html)
+- [AWS CLI: API レベル (s3api) コマンド](https://docs.aws.amazon.com/ja_jp/cli/latest/userguide/cli-services-s3-apicommands.html)
+- [S3: プレフィックスを使用したオブジェクトの整理](https://docs.aws.amazon.com/ja_jp/AmazonS3/latest/userguide/using-prefixes.html)
+- [S3: ListObjectsV2](https://docs.aws.amazon.com/AmazonS3/latest/API/API_ListObjectsV2.html)
+- [S3: バージョニング](https://docs.aws.amazon.com/ja_jp/AmazonS3/latest/userguide/Versioning.html)
+- [S3: オブジェクトの整合性の確認（ETag）](https://docs.aws.amazon.com/ja_jp/AmazonS3/latest/userguide/checking-object-integrity.html)
