@@ -273,3 +273,139 @@ aws s3api list-object-versions --bucket s3-demo-bucket --prefix notes/
 - [S3: ListObjectsV2](https://docs.aws.amazon.com/AmazonS3/latest/API/API_ListObjectsV2.html)
 - [S3: バージョニング](https://docs.aws.amazon.com/ja_jp/AmazonS3/latest/userguide/Versioning.html)
 - [S3: オブジェクトの整合性の確認（ETag）](https://docs.aws.amazon.com/ja_jp/AmazonS3/latest/userguide/checking-object-integrity.html)
+
+---
+
+# 演習4: DynamoDB — メモを保存するテーブル
+
+## 自分のまとめ
+
+- DynamoDB は2種類のプライマリキー（パーティションキーだけのシンプルなキー / パーティションキー＋ソートキーの複合キー）をサポートしていて、それをもとに CRUD 操作を行う
+- 上書きを防ぐには、条件式の `attribute_not_exists` にプライマリキーとして設定している属性を指定する
+- 全件を取得したいとき以外は、`query` を使う方が効率的にデータを取得できる
+
+## キーの役割
+
+| | 役割 |
+| --- | --- |
+| パーティションキー（HASH） | 値をハッシュ関数にかけた結果で、どのパーティション（物理的な記憶領域）に置くかが決まる |
+| ソートキー（RANGE） | 同じパーティションキーの中で、この値の順に並べて保存される |
+
+- 複合キーの場合は、`userId` + `createdAt` の組み合わせでユニークになる
+- `query` ではパーティションキーを `=` で1つに指定する必要がある。どのパーティションを見に行けばよいかが分からないと探せないため
+- キー以外の属性（`body` など）は `create-table` で定義しなくても、項目ごとに自由に持てる（スキーマレス）
+
+## 実行したコマンド
+
+### 1. テーブルを作る
+
+テーブル名は `Day01Notes`（教材の `day01-notes` ではない）。`createdAt` は `YYYYMMDDhhmmss` 形式の数値（`N`）にした。
+
+```bash
+aws dynamodb create-table --table-name Day01Notes --cli-input-json file://tables/notes.json
+```
+
+```json
+{
+  "AttributeDefinitions": [
+    { "AttributeName": "userId", "AttributeType": "S" },
+    { "AttributeName": "createdAt", "AttributeType": "N" }
+  ],
+  "KeySchema": [
+    { "AttributeName": "userId", "KeyType": "HASH" },
+    { "AttributeName": "createdAt", "KeyType": "RANGE" }
+  ],
+  "BillingMode": "PAY_PER_REQUEST"
+}
+```
+
+- ソートキーを文字列（ISO 8601 など）にしても、書式がそろっていれば辞書順＝時刻順になる。桁数やタイムゾーンがばらばらだと崩れる。数値でも秒とミリ秒が混ざると崩れる。どちらの型でも「書式（単位）を固定する」のがポイント
+
+### 2. put-item と上書き
+
+```bash
+aws dynamodb put-item --table-name Day01Notes \
+  --item '{"userId":{"S":"user01"}, "createdAt":{"N":"20261113235959"}, "body":{"S":"test01"}}'
+```
+
+- 数値（`N`）の値も JSON では文字列 `"20261113235959"` で渡す
+- 同じプライマリキーで put すると、エラーにならず**項目が丸ごと置き換わる**（件数は増えない）。`body` を付けずに put し直すと `body` が消える
+
+上書きを防ぐ条件付き put:
+
+```bash
+aws dynamodb put-item --table-name Day01Notes \
+  --item '{"userId":{"S":"user02"}, "createdAt":{"N":"20261113235959"}, "body":{"S":"test01"}}' \
+  --condition-expression "attribute_not_exists(userId)"
+# 同じキーがあれば ConditionalCheckFailedException
+```
+
+- 条件式は「テーブル全体」ではなく「書き込み先と同じプライマリキーの項目」に対して評価される。同じ `userId` でも `createdAt` が違えば成功する
+- そのため `attribute_not_exists(userId)` の1つで足りる（`AND attribute_not_exists(createdAt)` は不要）
+
+一部の属性だけ変える update-item:
+
+```bash
+aws dynamodb update-item --table-name Day01Notes \
+  --key '{"userId":{"S":"user04"}, "createdAt":{"N":"20261113235959"}}' \
+  --update-expression "SET #attr = :val" \
+  --expression-attribute-names '{"#attr":"body"}' \
+  --expression-attribute-values '{":val":{"S":"updated-test"}}' \
+  --return-values ALL_NEW
+```
+
+- put は項目を丸ごと置き換え、update は指定した属性だけを変える
+
+### 3. query と scan
+
+```bash
+# user01 のメモだけを新しい順に
+aws dynamodb query --table-name Day01Notes \
+  --key-condition-expression "userId = :name" \
+  --expression-attribute-values '{":name":{"S":"user01"}}' \
+  --no-scan-index-forward
+
+# 同じことを scan + フィルターで
+aws dynamodb scan --table-name Day01Notes \
+  --filter-expression "userId = :name" \
+  --expression-attribute-values '{":name":{"S":"user01"}}'
+```
+
+テーブル全体9件のとき:
+
+| | Count | ScannedCount | 並び順 |
+| --- | --- | --- | --- |
+| query | 5 | 5 | `--no-scan-index-forward` で降順（省略すると昇順） |
+| scan | 5 | 9 | 保証されない |
+
+- query は user01 のパーティションだけを読む。scan はテーブル全体を読んでから、フィルターで捨てている
+- 読み取りの料金は `ScannedCount` 側（読んだ量）で決まる。フィルターで捨てた分も払う
+- 1回で返るのは最大 1MB 分。超えると `LastEvaluatedKey` で続きを取り直す。フィルターは読んだ後にかかるので、`Count` が 0 でも続きがあることがある
+- scan が昇順に見えたのは、データが少なく同じパーティション内がソートキー順だったから。順序が必要なら query を使う
+- 小さいテーブルや全件を処理するバッチなら scan でも十分。問題は、テーブルが大きくなるほど（欲しい件数が同じでも）scan のコストと時間が増えていくこと（参考: [DynamoDB の Scan と Query のベンチマーク](https://dev.classmethod.jp/articles/dynamodb-scan-vs-query-benchmark/)）
+
+## つまずいたところ
+
+1. **パーティションキーを「シンプルなプライマリキー」と説明していた**
+   それはプライマリキーの種類の話。パーティションキーの役割は、どのパーティションに置くかを決めること
+2. **2人分ではなく1人分で5件入れていた**
+   ほかのユーザーのデータがないと、query で絞り込めたかどうかを確かめられない
+3. **put で新しく追加したつもりが、既存の項目を置き換えていた**
+   `Count` が増えていないことで気づける
+4. **キー以外の属性を「定義していないキー」と呼んでいた**
+   `body` はキーではなく属性
+5. **scan の結果を「昇順」と考えた**
+   scan の並び順は保証されない
+
+## LocalStack と本番 AWS の違いメモ
+
+- LocalStack は `create-table` の直後から `"TableStatus": "ACTIVE"` になる。本番は最初 `CREATING` で、ACTIVE になるまで put できない。`aws dynamodb wait table-exists` で待つのが定番
+- オンデマンドでも、LocalStack の出力には `ProvisionedThroughput`（0）が含まれていた
+
+## 参考ドキュメント
+
+- [DynamoDB のコアコンポーネント（プライマリキー）](https://docs.aws.amazon.com/ja_jp/amazondynamodb/latest/developerguide/HowItWorks.CoreComponents.html)
+- [パーティションとデータ分散](https://docs.aws.amazon.com/ja_jp/amazondynamodb/latest/developerguide/HowItWorks.Partitions.html)
+- [PutItem](https://docs.aws.amazon.com/ja_jp/amazondynamodb/latest/APIReference/API_PutItem.html)
+- [条件式](https://docs.aws.amazon.com/ja_jp/amazondynamodb/latest/developerguide/Expressions.ConditionExpressions.html)
+- [DynamoDB のスキャン](https://docs.aws.amazon.com/ja_jp/amazondynamodb/latest/developerguide/Scan.html)
