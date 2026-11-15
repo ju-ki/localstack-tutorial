@@ -1,0 +1,19 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(docker compose logs *)",
+      "Bash(docker run *)",
+      "Bash(echo \"Exit: $?\")",
+      "Bash(docker compose up *)",
+      "Bash(docker compose *)",
+      "Bash(curl -s http://localhost:4566/_localstack/health)",
+      "Bash(python3 -m json.tool)",
+      "Bash(python3 -c \"import sys,json; d=json.load\\(sys.stdin\\); print\\(d[0]['State']\\)\")",
+      "Read(//Users/jukiya/.docker/run/**)",
+      "Read(//run/**)",
+      "Bash(python3 -c \"import sys,json; d=json.load\\(sys.stdin\\); cfg=d[0]['Config']; print\\('Entrypoint:', cfg.get\\('Entrypoint'\\)\\); print\\('Cmd:', cfg.get\\('Cmd'\\)\\); print\\('Image:', d[0]['RepoTags']\\)\")",
+      "Bash(docker rmi *)",
+      "Bash(docker pull *)"
+    ]
+  }
+}

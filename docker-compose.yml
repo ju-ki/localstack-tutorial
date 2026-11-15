@@ -8,5 +8,4 @@ services:
     environment:
       - DOCKER_HOST=unix:///var/run/docker.sock
     volumes:
-      - "${HOME}/.docker/run/docker.sock:/var/run/docker.sock"
-
+      - '/var/run/docker.sock:/var/run/docker.sock'    
