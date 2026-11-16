@@ -84,9 +84,14 @@ docker compose down && docker compose up -d
 
 ## まとめ（根本原因）
 
-1. macOS の Docker Desktop はデフォルトで `/var/run/docker.sock` を作らない
-2. そのため LocalStack コンテナ内から Docker デーモンに通信できなかった
-3. Docker Desktop の設定で default socket を有効にし、そのパスをマウントすることで解決
+`DOCKER_HOST=unix:///var/run/docker.sock`（env の設定）と、実際にマウントされていたソケットのパス（`~/.docker/run/docker.sock`）が**ズレていた**ことが本質的な原因。
+
+以前の Docker Desktop は `/var/run/docker.sock` がデフォルトのソケットパスだったが、現在のデフォルトは `~/.docker/run/docker.sock` に変わっている。env はの古いパスを向いたままだった。
+
+Docker Desktop の **"Allow the default Docker socket to be used"** を ON にすることで `/var/run/docker.sock` がシンボリックリンクとして作成され、env の設定と実際のソケットのパスが一致して解決した。
+
+> なお `/var/run/docker.sock` はシンボリックリンクで `~/.docker/run/docker.sock` に向いているため、実態は同じソケットを使っている。
+> 今後 env のパスを `~/.docker/run/docker.sock` に合わせる方法でも解決できる。
 
 ## 参考
 
