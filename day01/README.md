@@ -409,3 +409,104 @@ aws dynamodb scan --table-name Day01Notes \
 - [PutItem](https://docs.aws.amazon.com/ja_jp/amazondynamodb/latest/APIReference/API_PutItem.html)
 - [条件式](https://docs.aws.amazon.com/ja_jp/amazondynamodb/latest/developerguide/Expressions.ConditionExpressions.html)
 - [DynamoDB のスキャン](https://docs.aws.amazon.com/ja_jp/amazondynamodb/latest/developerguide/Scan.html)
+
+---
+
+# 演習5: Lambda — 関数を作って呼ぶ
+
+## 自分のまとめ
+
+- Lambda を使うと、Lambda 側が実行環境を用意して、指定された関数を実行する
+- `--payload` で値を渡すと、ハンドラーの `event` にその値が入る
+- AWS CLI v2 で `--payload` を指定するときは、基本的に `--cli-binary-format raw-in-base64-out` を付ける必要がある。v2 はバイナリ型の引数を base64 の文字列として受け取るため
+
+## event と handler
+
+- `event` は、ただの JSON オブジェクト。中身の形は「誰が呼んだか」で決まる（S3 トリガーなら `Records[0].s3...`、CLI の invoke なら `--payload` に書いた JSON そのもの）
+- 実行環境は毎回作られるとは限らない。初回はつくるが（コールドスタート）、続けて呼ぶと使い回されることがある（ウォームスタート）
+- `--handler codes/hello.handler` は、最後の `.` で2つに分かれる
+
+| 部分 | 指しているもの |
+| --- | --- |
+| `codes/hello` | **zip を展開した中の**ファイルのパス（`codes/hello.mjs`、拡張子は書かない） |
+| `handler` | そのファイルが export している関数の名前 |
+
+- `fileb://codes/hello.zip` は **手元の Mac 上で** zip がどこにあるか。`--handler` のパスとは別物
+- `.mjs` なら ES Modules（`export const handler = ...`）、`.js` なら（package.json の指定がなければ）CommonJS（`exports.handler = ...`）で書く
+
+## 実行したコマンド
+
+### 1. 関数を作る
+
+```zsh
+aws lambda create-function --function-name log-event \
+  --zip-file fileb://codes/hello.zip \
+  --handler hello.handler \
+  --role arn:aws:iam::000000000000:role/sample-role \
+  --runtime nodejs18.x
+
+# 作成直後は "State": "Pending"、get-function で "Active" になったことを確認
+aws lambda get-function --function-name log-event
+```
+
+### 2. handler を zip の中のパスに合わせる
+
+zip の中に `codes/hello.mjs` というパスで入っていたため、handler を合わせた。
+
+```zsh
+aws lambda update-function-configuration --function-name log-event --handler codes/hello.handler
+```
+
+### 3. event をそのまま返すように直して更新し、invoke する
+
+```js
+export const handler = async (event, context) => {
+  console.info("EVENT\n" + JSON.stringify(event, null, 2))
+  return event
+}
+```
+
+```zsh
+aws lambda update-function-code --function-name log-event --zip-file fileb://codes/hello.zip
+aws lambda invoke --function-name log-event outputfile.txt \
+  --cli-binary-format raw-in-base64-out \
+  --payload '{ "key": "value" }'
+
+cat outputfile.txt
+# {"key":"value"}
+```
+
+## invoke の結果の読み方
+
+- `"StatusCode": 200` は「invoke という API の呼び出しが成功した」という意味。関数の中のエラーは `"FunctionError": "Unhandled"` のほうに出る
+- エラーの中身（`errorType` / `errorMessage`）は、出力ファイル（`outputfile.txt`）に書かれる
+
+## つまずいたところ
+
+1. **`Error while creating lambda: Docker not available`**
+   LocalStack は関数を別の Docker コンテナで動かすので、docker.sock のマウントが必要。詳しくは [notes/lambda-docker-troubleshooting.md](../notes/lambda-docker-troubleshooting.md)
+2. **`export const handler async(...)` で `=` が抜けていた**
+   invoke は 200 なのに `FunctionError: Unhandled` になった
+3. **`Runtime.ImportModuleError: Cannot find module 'hello'`**
+   リポジトリ直下から zip を作ったので、zip の中に `codes/hello.mjs` で入っていた。ランタイムは zip を展開した直下から `hello` を探すため、見つからなかった。原因を「`fileb://codes/...` を指定したから」と考えたが、それは手元のパスで関係ない。`unzip -l` で中身を確かめるのが早い
+4. **途中で `exports.handler`（CommonJS）に変えた**
+   `.mjs` では ES Modules の書き方にする必要がある
+5. **`--cli-binary-format` を付けずに動いたと思った**
+   実際には `InvalidRequestContentException: Could not parse payload into json` で失敗していた。invoke が失敗すると出力ファイルは書き換えられないので、`outputfile.txt` には前回成功したときの中身が残っていた
+6. **`output = json` が `--payload` の解釈に関係すると考えた**
+   `output` は結果の表示形式の設定。入力の解釈は `cli_binary_format` という別の設定
+
+## LocalStack と本番 AWS の違いメモ
+
+- LocalStack は関数を Docker コンテナで実行するので、ホストの docker.sock をマウントする必要がある。初回の invoke はイメージの取得で時間がかかることがある
+- `nodejs18.x` は、本番 AWS ではサポートが終了したランタイム。LocalStack では動くが、本番では `nodejs20.x` 以上を使う
+- invoke の `LogResult` は、LocalStack では空だった。本番では直近のログ（最大4KB）が base64 で入る
+
+## 参考ドキュメント
+
+- [Node.js の Lambda ハンドラー](https://docs.aws.amazon.com/ja_jp/lambda/latest/dg/nodejs-handler.html)
+- [Lambda 実行環境のライフサイクル](https://docs.aws.amazon.com/ja_jp/lambda/latest/dg/lambda-runtime-environment.html)
+- [Lambda ランタイム（非推奨化のスケジュール）](https://docs.aws.amazon.com/ja_jp/lambda/latest/dg/lambda-runtimes.html)
+- [AWS CLI v2 の変更点（バイナリパラメータ）](https://docs.aws.amazon.com/ja_jp/cli/latest/userguide/cliv2-migration-changes.html#cliv2-migration-binaryparam)
+- [AWS CLI の設定（cli_binary_format）](https://docs.aws.amazon.com/ja_jp/cli/latest/userguide/cli-configure-files.html#cli-config-cli_binary_format)
+- [LocalStack: Lambda](https://docs.localstack.cloud/user-guide/aws/lambda/)
