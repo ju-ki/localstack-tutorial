@@ -510,3 +510,61 @@ cat outputfile.txt
 - [AWS CLI v2 の変更点（バイナリパラメータ）](https://docs.aws.amazon.com/ja_jp/cli/latest/userguide/cliv2-migration-changes.html#cliv2-migration-binaryparam)
 - [AWS CLI の設定（cli_binary_format）](https://docs.aws.amazon.com/ja_jp/cli/latest/userguide/cli-configure-files.html#cli-config-cli_binary_format)
 - [LocalStack: Lambda](https://docs.localstack.cloud/user-guide/aws/lambda/)
+
+---
+
+# 演習6: CloudWatch Logs — ログを追う
+
+## 自分のまとめ
+
+- CloudWatch Logs は、AWS サービスやアプリなどから出力されたログの収集・監視・保存などができるサービス
+- ロググループとは、アプリやサービス単位のログストリームの集まりのこと。今回であれば Lambda の関数一つがグループの単位になる
+- ログストリームは、アプリや関数の実行環境（1コンテナにつき1つ）ごとにまとまって出力されたもの
+- RequestId は、関数や処理の呼び出しごとに生成される
+
+## ログの単位
+
+| 単位 | 何ごとに1つか | 今回の例 |
+| --- | --- | --- |
+| ロググループ | 関数1つ（名前は `/aws/lambda/<関数名>` で自動的に決まる） | `/aws/lambda/log-event` |
+| ログストリーム | 実行環境（コンテナ）1つ | `2026/11/26/[$LATEST]c9240a9f...` |
+| RequestId | invoke 1回（START〜REPORT の一区切り） | `ec8621af-...` |
+
+- 同じ実行環境が使い回されている間は、同じストリームに書き続ける（1つのストリームに RequestId のちがう invoke が3回ぶん入っていた）
+- `update-function-code` のあとや、しばらく呼ばれずにコンテナが片付けられたあとは、新しい実行環境が立ち上がるので、新しいストリームになる
+- 1つの実行環境は、一度に1つのリクエストしか処理しない。同時に2回 invoke すると実行環境が2つになり、ストリームも2つになる（同時実行）
+
+## 実行したコマンド
+
+```zsh
+# ロググループを探す
+aws logs describe-log-groups
+
+# 直近のログを表示する（10m では何も出なかったので 1d に広げた）
+aws logs tail /aws/lambda/log-event --since 1d
+
+# 流しっぱなしにして、別のターミナルで invoke する
+aws logs tail /aws/lambda/log-event --follow
+```
+
+## つまずいたところ
+
+1. **ログストリームを「イベントごと」「関数単位」と考えた**
+   正しくは実行環境ごと。1つのストリームに複数の RequestId が入っていること、update-function でストリームが変わったことから確かめられる
+2. **同時に2回 invoke してもストリームは1つだと考えた**
+   実行環境は一度に1つのリクエストしか処理しないので、2つ目の実行環境ができ、ストリームも2つになる
+3. **`--since 10m` で何も出なかった**
+   最後に invoke してから10分以上たっていたため。`--since` は「どこまでさかのぼるか」
+
+## LocalStack と本番 AWS の違いメモ
+
+- 本番では、Lambda の実行ロールに `logs:CreateLogGroup` / `logs:CreateLogStream` / `logs:PutLogEvents` の権限がないとログが出ない（`AWSLambdaBasicExecutionRole` で付けるのが定番）。LocalStack はそこを厳しくチェックしない
+- LocalStack は、本番とまったく同じ数だけ実行環境を立てるとは限らない
+- `} "key": "value"` のように行が崩れて見えるのは表示の問題。Node.js ランタイムは複数行のログを1イベントにまとめるため改行を `\r` に置き換えていて、ターミナルが行頭から書き重ねている（本番も同じ）
+
+## 参考ドキュメント
+
+- [CloudWatch Logs の概念（ロググループとログストリーム）](https://docs.aws.amazon.com/ja_jp/AmazonCloudWatch/latest/logs/CloudWatchLogsConcepts.html)
+- [Lambda の実行環境のライフサイクル](https://docs.aws.amazon.com/ja_jp/lambda/latest/dg/lambda-runtime-environment.html)
+- [Lambda の同時実行について](https://docs.aws.amazon.com/ja_jp/lambda/latest/dg/lambda-concurrency.html)
+- [aws logs tail（CLI リファレンス）](https://awscli.amazonaws.com/v2/documentation/api/latest/reference/logs/tail.html)
